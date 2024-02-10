@@ -1,0 +1,17 @@
+[package]
+name = "bigshot"
+description = "Do you wanna be a BIG SHOT?"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["buj"]
+keywords = ["desktop", "screenshot", "util"]
+repository = "https://github.com/5GameMaker/bigshot.git"
+homepage = "https://github.com/5GameMaker/bigshot.git"
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+image = "0.24.8"
+sdl3 = { version = "0.5.0", features = ["bundled", "static-link"] }

@@ -5,15 +5,17 @@
 //! `bigshot` is a quick alterative to `flameshot` because `flameshot` doesn't work on
 //! `Hyprland`
 
-use core::panic;
+//mod drv;
+
 use std::{
     io::{Cursor, Write},
+    mem::transmute,
     process::{Command, Stdio},
     time::Duration,
 };
 
-use image::{io::Reader, GenericImage};
-use sdl3::{keyboard::Keycode, mouse::MouseButton, pixels::Color};
+use image::{io::Reader, EncodableLayout, GenericImage};
+use sdl3::{keyboard::Keycode, mouse::MouseButton, pixels::Color, render::Texture};
 
 #[derive(Clone)]
 struct Region {
@@ -52,9 +54,14 @@ impl Region {
 }
 
 fn main() {
+    // This may be racy, but I just want sdl3 to work
+    unsafe {
+        std::env::set_var("DISPLAY", "");
+    }
+
     let mut pic = {
         let output = Command::new("grim")
-            .args(["-t", "png", "-"])
+            .args(["-c", "-t", "png", "-"])
             .output()
             .expect("failed to run grim");
 
@@ -69,34 +76,71 @@ fn main() {
             .expect("image decoding error")
     };
 
+    eprintln!("image format: {:?}", pic.color());
+
     let sdl = sdl3::init().expect("failed to initialize sdl");
     let video = sdl.video().expect("failed to initialize sdl video");
     let mut events = sdl.event_pump().expect("failed to initialize sdl events");
 
-    let mut window = video
-        .window("bigshot", pic.width(), pic.height())
-        .maximized()
-        .borderless()
-        .fullscreen()
-        .build()
-        .expect("failed to create sdl window")
-        .into_canvas()
-        .build()
-        .expect("failed to create sdl canvas");
+    let (min_x, min_y) = video
+        .displays()
+        .unwrap()
+        .iter()
+        .map(|x| x.get_bounds().unwrap())
+        .map(|x| (x.x(), x.y()))
+        .reduce(|x, a| (x.0.min(a.0), x.1.min(a.1)))
+        .unwrap();
 
-    let texture_creator = window.texture_creator();
+    let mut windows = {
+        let mut windows = vec![];
+        for display in video.displays().unwrap() {
+            let mut window = video
+                .window("bigshot", pic.width(), pic.height())
+                .maximized()
+                .borderless()
+                .fullscreen()
+                .build()
+                .expect("failed to create sdl window")
+                .into_canvas();
 
-    let texture = {
-        let rgb8 = pic.as_rgb8().expect("failed to create texture");
-        let mut tex = texture_creator
-            .create_texture_static(
-                sdl3::pixels::PixelFormatEnum::RGB24,
-                rgb8.width(),
-                rgb8.height(),
-            )
-            .expect("failed to create texture");
-        tex.update(None, rgb8, rgb8.width() as usize * 3).unwrap();
-        tex
+            let texture_creator = window.texture_creator();
+            let rect = display.get_usable_bounds().unwrap();
+
+            let texture = {
+                let rgb8 = pic
+                    .sub_image(
+                        (rect.x() - min_x) as u32,
+                        (rect.y() - min_y) as u32,
+                        rect.width(),
+                        rect.height(),
+                    )
+                    .to_image();
+                let mut tex = texture_creator
+                    .create_texture_static(
+                        unsafe {
+                            sdl3::pixels::PixelFormat::from_ll(
+                                sdl3::pixels::PixelFormatEnum::ABGR8888.to_ll(),
+                            )
+                        },
+                        rect.width(),
+                        rect.height(),
+                    )
+                    .expect("failed to create texture");
+                tex.update(None, rgb8.as_bytes(), rgb8.width() as usize * 4)
+                    .unwrap();
+                tex
+            };
+            let texture: Texture<'static> = unsafe { transmute(texture) };
+
+            window
+                .window_mut()
+                .set_display_mode(display.get_mode().unwrap())
+                .unwrap();
+            window.window_mut().set_fullscreen(true).unwrap();
+
+            windows.push((window, texture, (rect.x(), rect.y())));
+        }
+        windows
     };
 
     let mut region = None;
@@ -112,15 +156,31 @@ fn main() {
                     mouse_btn: MouseButton::Left,
                     x,
                     y,
+                    window_id,
                     ..
                 } => {
-                    region = Some(Region::dot(x as u32, y as u32));
+                    let shift = windows
+                        .iter()
+                        .find(|x| x.0.window().id() == window_id)
+                        .map(|x| x.2)
+                        .unwrap();
+                    region = Some(Region::dot(
+                        (x + shift.0 as f32) as u32,
+                        (y + shift.1 as f32) as u32,
+                    ));
                     selecting_region = true;
                 }
-                E::MouseMotion { x, y, .. } => {
+                E::MouseMotion {
+                    x, y, window_id, ..
+                } => {
+                    let shift = windows
+                        .iter()
+                        .find(|x| x.0.window().id() == window_id)
+                        .map(|x| x.2)
+                        .unwrap();
                     if selecting_region {
                         if let Some(r) = &mut region {
-                            r.stretch(x as u32, y as u32);
+                            r.stretch((x + shift.0 as f32) as u32, (y + shift.1 as f32) as u32);
                         }
                     }
                 }
@@ -128,10 +188,16 @@ fn main() {
                     mouse_btn: MouseButton::Left,
                     x,
                     y,
+                    window_id,
                     ..
                 } => {
+                    let shift = windows
+                        .iter()
+                        .find(|x| x.0.window().id() == window_id)
+                        .map(|x| x.2)
+                        .unwrap();
                     if let Some(r) = &mut region {
-                        r.stretch(x as u32, y as u32);
+                        r.stretch((x + shift.0 as f32) as u32, (y + shift.1 as f32) as u32);
                         selecting_region = false;
                     }
                 }
@@ -146,20 +212,22 @@ fn main() {
             }
         }
 
-        window.copy(&texture, None, None).unwrap();
-        if let Some(mut x) = region.clone() {
-            x.normalize();
-            window.set_draw_color(Color::MAGENTA);
-            window
-                .draw_rect(sdl3::render::FRect {
-                    x: x.x1 as f32,
-                    y: x.y1 as f32,
-                    w: x.x2 as f32 - x.x1 as f32 + 1.0,
-                    h: x.y2 as f32 - x.y1 as f32 + 1.0,
-                })
-                .unwrap();
+        for (window, texture, shift) in &mut windows {
+            window.copy(texture, None, None).unwrap();
+            if let Some(mut x) = region.clone() {
+                x.normalize();
+                window.set_draw_color(Color::MAGENTA);
+                window
+                    .draw_rect(sdl3::render::FRect {
+                        x: x.x1 as f32 - shift.0 as f32,
+                        y: x.y1 as f32 - shift.1 as f32,
+                        w: x.x2 as f32 - x.x1 as f32 + 1.0,
+                        h: x.y2 as f32 - x.y1 as f32 + 1.0,
+                    })
+                    .unwrap();
+            }
+            window.present();
         }
-        window.present();
 
         std::thread::sleep(Duration::from_millis(16));
     }

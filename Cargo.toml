@@ -1,7 +1,7 @@
 [package]
 name = "bigshot"
 description = "Do you wanna be a BIG SHOT?"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["buj"]
@@ -14,4 +14,5 @@ readme = "README.md"
 
 [dependencies]
 image = "0.24.8"
-sdl3 = { version = "0.5.0", features = ["bundled", "static-link"] }
+sdl3 = { version = "0.14.36", features = ["build-from-source-static"] }
+commons = { git = "https://github.com/5GameMaker/libcommons", branch = "stable", features = ["extra_traits"] }
